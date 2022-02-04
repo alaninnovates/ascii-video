@@ -64,9 +64,9 @@ fn main() {
     let frame_cmd = Command::new("ffmpeg")
         .args(["-i", video_name])
         .args(["-c:v", "png"])
+        .args(["-filter:v", "fps=30"])
         .args(["-vf", "format=rgb24"])
         .args(["-vcodec", "rawvideo"])
-        .args(["-r", "60"])
         .args(["-f", "image2pipe", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -94,7 +94,7 @@ fn main() {
         ).expect("Buffer to be the correct size");
         let rgb_image = DynamicImage::ImageRgb8(image);
         print!("{}", image_to_ascii(rgb_image, 20));
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(30));
         cls();
     }
 }
