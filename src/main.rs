@@ -1,8 +1,8 @@
-use std::fs;
-use std::process::Command;
+use std::io::{ErrorKind, Read};
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
-use image::{DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, RgbImage};
 use image::imageops::FilterType;
 
 fn image_to_ascii(image: DynamicImage, resolution: u32) -> String {
@@ -30,41 +30,71 @@ fn cls() {
     print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
 }
 
-fn main() {
-    println!("Loading frames...");
-    let mut ffmpeg_cmd = Command::new("ffmpeg")
-        .args(["-i", "stick_vid.mp4"])
-        .args(["-r", "60"])
-        .arg("frames/out-%03d.jpg")
-        .spawn()
-        .expect("FFmpeg errored");
-    ffmpeg_cmd.wait();
-    println!("Done loading frames");
-    let mut frame_paths: Vec<_> = fs::read_dir("./frames").unwrap()
-        .map(|r| r.unwrap())
-        .collect();
-    frame_paths.sort_by_key(|entry| entry.file_name());
-    let mut images_ascii = Vec::new();
-    println!("Rendering frames...");
-    for frame_path in frame_paths {
-        let image = image::open(frame_path.path().as_path());
-        images_ascii.push(image_to_ascii(image.unwrap(), 20));
-        println!("Rendered: {}", frame_path.path().display());
-    }
-    for img in images_ascii {
-        print!("{}", img);
-        thread::sleep(Duration::from_millis(30));
-        cls();
-    }
+// this is all we need, even though there are definitely more properties
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct FfProbeData {
+    pub streams: Vec<Stream>,
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::image_to_ascii;
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct Stream {
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+}
 
-    #[test]
-    fn convert_img_to_ascii() {
-        let img = image::open("./test_img.png").unwrap();
-        print!("{}", image_to_ascii(img, 20));
+fn get_video_info(video_name: &str) -> FfProbeData {
+    let ffprobe_cmd = Command::new("ffprobe")
+        .args(["-v", "quiet"])
+        .args(["-print_format", "json"])
+        .arg("-show_streams")
+        .arg("-show_format")
+        .arg(video_name)
+        .output()
+        .unwrap();
+    if !ffprobe_cmd.status.success() {
+        println!("Failed to parse video metadata")
+    }
+    serde_json::from_slice::<FfProbeData>(&ffprobe_cmd.stdout).unwrap()
+}
+
+fn main() {
+    let video_name = "./stick_vid.mp4";
+    let video_info = get_video_info(video_name).streams;
+    println!("Gathering frames from ffmpeg...");
+    let frame_cmd = Command::new("ffmpeg")
+        .args(["-i", video_name])
+        .args(["-c:v", "png"])
+        .args(["-vf", "format=rgb24"])
+        .args(["-vcodec", "rawvideo"])
+        .args(["-r", "60"])
+        .args(["-f", "image2pipe", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = frame_cmd.stdout.unwrap();
+    let stderr = frame_cmd.stderr.unwrap();
+
+    println!("Starting video loop...");
+    let video_width = video_info[0].width.unwrap();
+    let video_height = video_info[0].height.unwrap();
+    loop {
+        let mut buffer = vec![0u8; (video_width * video_height * 3) as usize];
+
+        if let Err(err) = stdout.read_exact(&mut buffer) {
+            if err.kind() == ErrorKind::UnexpectedEof {
+                break;
+            }
+            println!("{}", err);
+            break;
+        }
+        let image = RgbImage::from_raw(
+            video_width as u32, video_height as u32,
+            buffer,
+        ).expect("Buffer to be the correct size");
+        let rgb_image = DynamicImage::ImageRgb8(image);
+        print!("{}", image_to_ascii(rgb_image, 20));
+        thread::sleep(Duration::from_millis(10));
+        cls();
     }
 }
